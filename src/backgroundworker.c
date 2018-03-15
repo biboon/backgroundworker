@@ -4,25 +4,22 @@
 #include <string.h>
 
 
-struct backgroundworker_DoWorkEventArgs {
-	void  *Argument,    *Result;
-	size_t Argument_len, Result_len;
-	int Cancel;
-};
-
 struct backgroundworker {
 	pthread_t tid;
 	pthread_mutex_t lock;
 
-	void (*DoWork            )(bw_t *worker, bw_DoWorkEventArgs_t *);
+	void (*DoWork            )(bw_t *worker, void *arg);
 	void (*ProgressChanged   )(bw_t *worker, int percentage);
-	void (*RunWorkerCompleted)(bw_t *worker, void *);
+	void (*RunWorkerCompleted)(bw_t *worker, void *res);
 
 	int CancellationPending;
 	int IsBusy;
 	int WorkerReportsProgress;
 
-	bw_DoWorkEventArgs_t DoWorkEventArgs;
+	struct {
+		void *p;
+		size_t len;
+	} Argument, Result;
 };
 
 
@@ -52,13 +49,13 @@ bw_t *bw_Create(void)
 void bw_Destroy(bw_t *worker)
 {
 	pthread_mutex_destroy(&worker->lock);
-	free(worker->DoWorkEventArgs.Argument);
-	free(worker->DoWorkEventArgs.Result);
+	free(worker->Argument.p);
+	free(worker->Result.p);
 	free(worker);
 }
 
 
-void bw_DoWork(bw_t *worker, void (*DoWork)(bw_t *, bw_DoWorkEventArgs_t *))
+void bw_DoWork(bw_t *worker, void (*DoWork)(bw_t *, void *))
 {
 	pthread_mutex_lock(&worker->lock);
 	worker->DoWork = DoWork;
@@ -130,24 +127,23 @@ void bw_RunWorkerAsync(bw_t *worker, void *arg, size_t len)
 
 	if (arg != NULL && len != 0)
 	{
-		if (worker->DoWorkEventArgs.Argument_len < len)
+		if (worker->Argument.len < len)
 		{
-			void *ptr = realloc(worker->DoWorkEventArgs.Argument, len);
+			void *ptr = realloc(worker->Argument.p, len);
 			if (ptr == NULL)
 			{
 				pthread_mutex_unlock(&worker->lock);
 				return;
 			}
 
-			worker->DoWorkEventArgs.Argument     = ptr;
-			worker->DoWorkEventArgs.Argument_len = len;
+			worker->Argument.p   = ptr;
+			worker->Argument.len = len;
 		}
 
-		memcpy(worker->DoWorkEventArgs.Argument, arg, len);
+		memcpy(worker->Argument.p, arg, len);
 	}
 
-	worker->DoWorkEventArgs.Cancel = 0;
-	worker->CancellationPending    = 0;
+	worker->CancellationPending = 0;
 
 	pthread_create(&worker->tid, &attr, bw_RunWorker, worker);
 
@@ -156,7 +152,7 @@ void bw_RunWorkerAsync(bw_t *worker, void *arg, size_t len)
 
 void *bw_RunWorker(void *arg)
 {
-	void (*DoWork            )(bw_t *, bw_DoWorkEventArgs_t *);
+	void (*DoWork            )(bw_t *, void *);
 	void (*RunWorkerCompleted)(bw_t *, void *);
 
 	bw_t *worker = (bw_t *) arg;
@@ -167,14 +163,40 @@ void *bw_RunWorker(void *arg)
 	worker->IsBusy = 1;
 	pthread_mutex_unlock(&worker->lock);
 
-	if (DoWork != NULL) DoWork(worker, &worker->DoWorkEventArgs);
-	if (RunWorkerCompleted != NULL) RunWorkerCompleted(worker, NULL);
+	if (DoWork != NULL) DoWork(worker, worker->Argument.p);
+	if (RunWorkerCompleted != NULL) RunWorkerCompleted(worker, worker->Result.p);
 
 	pthread_mutex_lock(&worker->lock);
 	worker->IsBusy = 0;
 	pthread_mutex_unlock(&worker->lock);
 
 	pthread_exit(NULL);
+}
+
+
+void bw_WorkerComplete(bw_t *worker, void *res, size_t len)
+{
+	pthread_mutex_lock(&worker->lock);
+
+	if (res != NULL && len != 0)
+	{
+		if (worker->Result.len < len)
+		{
+			void *ptr = realloc(worker->Result.p, len);
+			if (ptr == NULL)
+			{
+				pthread_mutex_unlock(&worker->lock);
+				return;
+			}
+
+			worker->Result.p   = ptr;
+			worker->Result.len = len;
+		}
+
+		memcpy(worker->Result.p, res, len);
+	}
+
+	pthread_mutex_unlock(&worker->lock);
 }
 
 
@@ -190,29 +212,4 @@ void bw_ReportProgress(bw_t *worker, int value)
 	pthread_mutex_unlock(&worker->lock);
 
 	if (ProgressChanged != NULL) ProgressChanged(worker, value);
-}
-
-
-/* DoWorkEventArgs functions */
-
-void *bw_DoWorkEventArgs_Argument(bw_DoWorkEventArgs_t *e)
-{
-	return e->Argument;
-}
-
-
-void bw_DoWorkEventArgs_Result(bw_DoWorkEventArgs_t *e, void *res, size_t len)
-{
-	if (res == NULL || len == 0) return;
-
-	if (e->Result_len < len)
-	{
-		void *ptr = realloc(e->Result, len);
-		if (ptr == NULL) return;
-
-		e->Result     = ptr;
-		e->Result_len = len;
-	}
-
-	memcpy(e->Result, res, len);
 }
