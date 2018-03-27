@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "backgroundworker.h"
@@ -8,25 +10,33 @@ void DoWork            (bw_t *worker, void *arg);
 void RunWorkerCompleted(bw_t *worker, void *res);
 void ProgressChanged   (bw_t *worker, int percentage);
 
+
 void DoWork(bw_t *worker, void *arg)
 {
-	int loops = *(int *) arg;
-	char res[] = "TASK OVER";
-	int i;
+	struct drand48_data buffer;
+	double x, y, pi;
+	int shots = *(int *) arg;
+	int hits = 0;
+	int shoot;
 
-	for (i = 0; i < loops; ++i)
+	srand48_r(time(NULL) * (long int) worker, &buffer);
+
+	for (shoot = 0; shoot < shots; ++shoot)
 	{
-		printf("DoWork loop %d\n", i);
-		bw_ReportProgress(worker, (i + 1) * 100 / loops);
+		drand48_r(&buffer, &x);
+		drand48_r(&buffer, &y);
+		if (x * x + y * y < 1.0) hits++;
 	}
 
-	bw_WorkerComplete(worker, res, sizeof(res));
+	pi = 4 * (double) hits / (double) shots;
+
+	bw_WorkerExit(worker, &pi, sizeof(pi));
 }
 
 void RunWorkerCompleted(bw_t *worker, void *res)
 {
-	char *str = (char *) res;
-	printf("RunWorkerCompleted %s\n", str);
+	double pi = *(double *) res;
+	printf("Pi = %lf\n", pi);
 }
 
 void ProgressChanged(bw_t *worker, int percentage)
@@ -37,26 +47,26 @@ void ProgressChanged(bw_t *worker, int percentage)
 
 int main(int argc, char *argv[])
 {
-	bw_t *worker[3];
-	int loops = 10;
+	int shots = 1000000000;
+	bw_t *worker[8];
 	int w;
 
-	for (w = 0; w < 3; ++w)
+	for (w = 0; w < 8; ++w)
 	{
 		worker[w] = bw_Create();
 
 		bw_DoWork(worker[w], DoWork);
 		bw_RunWorkerCompleted(worker[w], RunWorkerCompleted);
-		bw_ProgressChanged(worker[w], ProgressChanged);
-		bw_WorkerReportsProgress(worker[w], 1);
 
-		bw_RunWorkerAsync(worker[w], &loops, sizeof(loops));
+		bw_RunWorkerAsync(worker[w], &shots, sizeof(shots));
 	}
 
-	sleep(1);
-
-	for (w = 0; w < 3; ++w)
+	for (w = 0; w < 8; ++w)
 	{
+		while (bw_IsBusy(worker[w]))
+		{
+			sleep(1);
+		}
 		bw_Destroy(worker[w]);
 	}
 

@@ -2,7 +2,6 @@
 #define __BACKGROUNDWORKER_H
 
 #include <stddef.h>
-#include <pthread.h>
 
 typedef struct backgroundworker bw_t;
 
@@ -23,8 +22,8 @@ int   bw_IsBusy(bw_t *worker);
 
 void  bw_WorkerReportsProgress(bw_t *worker, int b);
 
-void  bw_RunWorkerAsync(bw_t *worker, void *arg, size_t len);
-void  bw_WorkerComplete(bw_t *worker, void *res, size_t len);
+int   bw_RunWorkerAsync(bw_t *worker, void *arg, size_t len);
+void  bw_WorkerExit(bw_t *worker, void *res, size_t len);
 void  bw_ReportProgress(bw_t *worker, int value);
 
 #endif /* __BACKGROUNDWORKER_H */
