@@ -7,42 +7,29 @@
 #include "worker.h"
 
 
-void doWork            (worker_t *worker, void *arg);
-void runWorkerCompleted(worker_t *worker, void *res);
-void progressChanged   (worker_t *worker, int percentage);
-
-
-void doWork(worker_t *worker, void *arg)
+static double calcPi(int shots, long int seed)
 {
 	struct drand48_data buffer;
-	double x, y, pi;
-	int shots = *(int *) arg;
-	int hits = 0;
-	int shoot;
+	int hits, shoot;
+	double x, y;
 
-	srand48_r(time(NULL) * (long int) worker, &buffer);
+	srand48_r(time(NULL) * seed, &buffer);
 
-	for (shoot = 0; shoot < shots; ++shoot)
+	for (hits = shoot = 0; shoot < shots; ++shoot)
 	{
 		drand48_r(&buffer, &x);
 		drand48_r(&buffer, &y);
 		if (x * x + y * y < 1.0) hits++;
 	}
 
-	pi = 4 * (double) hits / (double) shots;
+	return 4 * (double) hits / (double) shots;
+}
 
+static void calcPi_work(worker_t *worker, void *arg)
+{
+	int shots = *(int *) arg;
+	double pi = calcPi(shots, (long int) worker);
 	worker_exit(worker, &pi, sizeof(pi));
-}
-
-void runWorkerCompleted(worker_t *worker, void *res)
-{
-	double pi = *(double *) res;
-	printf("Pi = %lf\n", pi);
-}
-
-void progressChanged(worker_t *worker, int percentage)
-{
-	printf(" > progressChanged %d%%\n", percentage);
 }
 
 
@@ -55,7 +42,7 @@ int main(int argc, char *argv[])
 	for (w = 0; w < 8; ++w)
 	{
 		worker[w] = worker_create();
-		worker_doWork(worker[w], doWork);
+		worker_doWork(worker[w], calcPi_work);
 		worker_run(worker[w], &shots, sizeof(shots), WORKER_JOINABLE);
 	}
 
