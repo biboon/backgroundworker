@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -54,19 +55,19 @@ int main(int argc, char *argv[])
 	for (w = 0; w < 8; ++w)
 	{
 		worker[w] = worker_create();
-
 		worker_doWork(worker[w], doWork);
-		worker_runWorkerCompleted(worker[w], runWorkerCompleted);
-
-		worker_runWorkerAsync(worker[w], &shots, sizeof(shots));
+		worker_run(worker[w], &shots, sizeof(shots), WORKER_JOINABLE);
 	}
 
 	for (w = 0; w < 8; ++w)
 	{
-		while (worker_isBusy(worker[w]))
-		{
-			sleep(1);
-		}
+		void *retval;
+		double pi;
+
+		worker_join(worker[w], &retval);
+		memcpy(&pi, retval, sizeof(pi));
+		printf("Pi = %lf\n", pi);
+
 		worker_destroy(worker[w]);
 	}
 
