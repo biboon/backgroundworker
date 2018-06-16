@@ -1,10 +1,10 @@
+#include "worker.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
-
-#include "worker.h"
+#include <time.h>
 
 
 static double calcPi(int shots, long int seed)
@@ -35,7 +35,7 @@ static void calcPi_work(worker_t *worker, void *arg)
 
 int main(int argc, char *argv[])
 {
-	int shots = 1000000000;
+	int shots = 10000;
 	worker_t *worker[8];
 	int w;
 

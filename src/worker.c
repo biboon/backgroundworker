@@ -1,5 +1,7 @@
+#define _POSIX_C_SOURCE 199506L
 #include "worker.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,23 +16,23 @@
 #define WORKER_SIGEXIT (SIGRTMIN + 1)
 #endif
 
+#define WORKER_ISBUSY    0x01
+#define WORKER_CANCELLED 0x02
+
 
 struct worker {
 	pid_t pid;
 	pthread_t tid;
 	pthread_attr_t attr;
 	pthread_mutex_t lock;
+	int flags;
 
 	void (*doWork            )(worker_t *worker, void *arg);
-	void (*progressChanged   )(worker_t *worker, int percentage);
 	void (*runWorkerCompleted)(worker_t *worker, void *res);
-
-	int cancellationPending;
-	int isBusy;
-	int workerReportsProgress;
+	void (*progressChanged   )(worker_t *worker, int percentage);
 
 	struct {
-		void *p;
+		void *ptr;
 		size_t len;
 	} argument, result;
 };
@@ -43,8 +45,26 @@ static void  WorkerExitsRoutine(int signo, siginfo_t *info, void *context);
 worker_t *worker_create(void)
 {
 	static int initialized = 0;
-	worker_t *worker;
-	int status = 0;
+	worker_t *ret, worker = { 0 };
+
+	if (pthread_mutex_init(&worker.lock, NULL) != 0) return NULL;
+	if (pthread_attr_init(&worker.attr) != 0)
+	{
+		pthread_mutex_destroy(&worker.lock);
+		return NULL;
+	}
+
+	worker.pid = getpid();
+
+	ret = malloc(sizeof(worker_t));
+	if (ret == NULL)
+	{
+		pthread_attr_destroy(&worker.attr);
+		pthread_mutex_destroy(&worker.lock);
+		return NULL;
+	}
+
+	*ret = worker;
 
 	if (!initialized)
 	{
@@ -56,36 +76,25 @@ worker_t *worker_create(void)
 		initialized = 1;
 	}
 
-	worker = calloc(1, sizeof(*worker));
-	if (worker == NULL)
-		return NULL;
-
-	status += pthread_mutex_init(&worker->lock, NULL);
-	status += pthread_attr_init(&worker->attr);
-
-	if (status != 0)
-	{
-		free(worker);
-		return NULL;
-	}
-
-	worker->pid = getpid();
-
-	return worker;
+	return ret;
 }
 
 void worker_destroy(worker_t *worker)
 {
-	pthread_mutex_destroy(&worker->lock);
-	pthread_attr_destroy(&worker->attr);
-	free(worker->argument.p);
-	free(worker->result.p);
-	free(worker);
+	if (worker != NULL)
+	{
+		pthread_mutex_destroy(&worker->lock);
+		pthread_attr_destroy(&worker->attr);
+		free(worker->argument.ptr);
+		free(worker->result.ptr);
+		free(worker);
+	}
 }
 
 
 void worker_doWork(worker_t *worker, void (*doWork)(worker_t *, void *))
 {
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
 	worker->doWork = doWork;
 	pthread_mutex_unlock(&worker->lock);
@@ -93,6 +102,7 @@ void worker_doWork(worker_t *worker, void (*doWork)(worker_t *, void *))
 
 void worker_progressChanged(worker_t *worker, void (*progressChanged)(worker_t *, int))
 {
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
 	worker->progressChanged = progressChanged;
 	pthread_mutex_unlock(&worker->lock);
@@ -100,24 +110,41 @@ void worker_progressChanged(worker_t *worker, void (*progressChanged)(worker_t *
 
 void worker_runWorkerCompleted(worker_t *worker, void (*runWorkerCompleted)(worker_t *, void *))
 {
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
 	worker->runWorkerCompleted = runWorkerCompleted;
 	pthread_mutex_unlock(&worker->lock);
 }
 
+
 void worker_cancelAsync(worker_t *worker)
 {
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
-	worker->cancellationPending = 1;
+	worker->flags |= WORKER_CANCELLED;
 	pthread_mutex_unlock(&worker->lock);
+}
+
+void worker_reportProgress(worker_t *worker, int value)
+{
+	void (*progressChanged)(worker_t *, int);
+
+	assert(worker != NULL);
+	pthread_mutex_lock(&worker->lock);
+	progressChanged = worker->progressChanged;
+	pthread_mutex_unlock(&worker->lock);
+
+	if (progressChanged != NULL)
+		progressChanged(worker, value);
 }
 
 int worker_cancellationPending(worker_t *worker)
 {
 	int ret;
 
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
-	ret = worker->cancellationPending;
+	ret = worker->flags & WORKER_CANCELLED;
 	pthread_mutex_unlock(&worker->lock);
 
 	return ret;
@@ -127,55 +154,22 @@ int worker_isBusy(worker_t *worker)
 {
 	int ret;
 
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
-	ret = worker->isBusy;
+	ret = worker->flags & WORKER_ISBUSY;
 	pthread_mutex_unlock(&worker->lock);
 
 	return ret;
 }
 
-void worker_reportsProgress(worker_t *worker, int b)
-{
-	pthread_mutex_lock(&worker->lock);
-	worker->workerReportsProgress = !!b;
-	pthread_mutex_unlock(&worker->lock);
-}
-
-int worker_join(worker_t *worker, void **retval)
-{
-	pthread_t tid;
-
-	pthread_mutex_lock(&worker->lock);
-	tid = worker->tid;
-	pthread_mutex_unlock(&worker->lock);
-
-	return pthread_join(tid, retval);
-}
-
-int worker_kill(worker_t *worker, int signo)
-{
-	pthread_t tid;
-
-	pthread_mutex_lock(&worker->lock);
-	tid = worker->tid;
-	pthread_mutex_unlock(&worker->lock);
-
-	return pthread_kill(tid, signo);
-}
-
 
 int worker_run(worker_t *worker, void *arg, size_t len, int detachstate)
 {
-	switch (detachstate)
-	{
-		case WORKER_DETACHED: detachstate = PTHREAD_CREATE_DETACHED; break;
-		case WORKER_JOINABLE: detachstate = PTHREAD_CREATE_JOINABLE; break;
-		default: return -1;
-	}
-
+	assert(worker != NULL);
+	assert(detachstate == WORKER_DETACHED || detachstate == WORKER_JOINABLE);
 	pthread_mutex_lock(&worker->lock);
 
-	if (worker->isBusy)
+	if (worker->flags & WORKER_ISBUSY)
 	{
 		pthread_mutex_unlock(&worker->lock);
 		return -1;
@@ -185,22 +179,28 @@ int worker_run(worker_t *worker, void *arg, size_t len, int detachstate)
 	{
 		if (worker->argument.len < len)
 		{
-			void *ptr = realloc(worker->argument.p, len);
+			void *ptr = realloc(worker->argument.ptr, len);
 			if (ptr == NULL)
 			{
 				pthread_mutex_unlock(&worker->lock);
 				return -1;
 			}
 
-			worker->argument.p   = ptr;
+			worker->argument.ptr = ptr;
 			worker->argument.len = len;
 		}
 
-		memcpy(worker->argument.p, arg, len);
+		memcpy(worker->argument.ptr, arg, len);
 	}
 
-	worker->isBusy = 1;
-	worker->cancellationPending = 0;
+	worker->flags |= WORKER_ISBUSY;
+	worker->flags &= ~WORKER_CANCELLED;
+
+	switch (detachstate)
+	{
+		case WORKER_DETACHED: detachstate = PTHREAD_CREATE_DETACHED; break;
+		case WORKER_JOINABLE: detachstate = PTHREAD_CREATE_JOINABLE; break;
+	}
 
 	pthread_attr_setdetachstate(&worker->attr, detachstate);
 	pthread_create(&worker->tid, &worker->attr, StartWorkerRoutine, worker);
@@ -215,34 +215,37 @@ void worker_exit(worker_t *worker, void *res, size_t len)
 	int detachstate;
 	void *retval = NULL;
 
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
 
 	if (res != NULL && len != 0)
 	{
 		if (worker->result.len < len)
 		{
-			void *ptr = realloc(worker->result.p, len);
+			void *ptr = realloc(worker->result.ptr, len);
 			if (ptr == NULL)
 			{
 				pthread_mutex_unlock(&worker->lock);
 				pthread_exit(NULL);
 			}
 
-			worker->result.p   = ptr;
+			worker->result.ptr = ptr;
 			worker->result.len = len;
 		}
 
-		memcpy(worker->result.p, res, len);
+		memcpy(worker->result.ptr, res, len);
 
-		retval = worker->result.p;
+		retval = worker->result.ptr;
 	}
 
-	worker->isBusy = 0;
+	worker->flags &= ~WORKER_ISBUSY;
 
 	pthread_attr_getdetachstate(&worker->attr, &detachstate);
 	if (detachstate == PTHREAD_CREATE_DETACHED)
 	{
-		sigqueue(worker->pid, WORKER_SIGEXIT, (union sigval)(void *) worker);
+		union sigval value;
+		value.sival_ptr = worker;
+		sigqueue(worker->pid, WORKER_SIGEXIT, value);
 	}
 
 	pthread_mutex_unlock(&worker->lock);
@@ -250,33 +253,40 @@ void worker_exit(worker_t *worker, void *res, size_t len)
 	pthread_exit(retval);
 }
 
-
-void worker_reportProgress(worker_t *worker, int value)
+int worker_join(worker_t *worker, void **retval)
 {
-	void (*progressChanged)(worker_t *, int);
+	pthread_t tid;
 
-	if (value > 100) value = 100;
-	if (value <   0) value =   0;
-
+	assert(worker != NULL);
 	pthread_mutex_lock(&worker->lock);
-	progressChanged = worker->workerReportsProgress ? worker->progressChanged : NULL;
+	tid = worker->tid;
 	pthread_mutex_unlock(&worker->lock);
 
-	if (progressChanged != NULL)
-		progressChanged(worker, value);
+	return pthread_join(tid, retval);
+}
+
+int worker_kill(worker_t *worker, int signo)
+{
+	pthread_t tid;
+
+	assert(worker != NULL);
+	pthread_mutex_lock(&worker->lock);
+	tid = worker->tid;
+	pthread_mutex_unlock(&worker->lock);
+
+	return pthread_kill(tid, signo);
 }
 
 
 void *StartWorkerRoutine(void *_worker)
 {
-	worker_t *worker = (worker_t *) _worker;
-
+	worker_t *worker = (worker_t *)_worker;
 	void (*doWork)(worker_t *, void *);
 	void *arg;
 
 	pthread_mutex_lock(&worker->lock);
 	doWork = worker->doWork;
-	arg = worker->argument.p;
+	arg = worker->argument.ptr;
 	pthread_mutex_unlock(&worker->lock);
 
 	if (doWork != NULL)
@@ -287,14 +297,13 @@ void *StartWorkerRoutine(void *_worker)
 
 void WorkerExitsRoutine(int signo, siginfo_t *info, void *context)
 {
-	worker_t *worker = (worker_t *) info->si_value.sival_ptr;
-
+	worker_t *worker = (worker_t *)info->si_value.sival_ptr;
 	void (*runWorkerCompleted)(worker_t *, void *);
 	void *res;
 
 	pthread_mutex_lock(&worker->lock);
 	runWorkerCompleted = worker->runWorkerCompleted;
-	res = worker->result.p;
+	res = worker->result.ptr;
 	pthread_mutex_unlock(&worker->lock);
 
 	if (runWorkerCompleted != NULL)

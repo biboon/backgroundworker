@@ -8,7 +8,7 @@ typedef struct worker worker_t;
 
 enum {
 	WORKER_DETACHED,
-	WORKER_JOINABLE,
+	WORKER_JOINABLE
 };
 
 
@@ -20,17 +20,13 @@ void worker_progressChanged(worker_t *worker, void (*progressChanged)(worker_t *
 void worker_runWorkerCompleted(worker_t *worker, void (*runWorkerCompleted)(worker_t *, void *));
 
 void worker_cancelAsync(worker_t *worker);
+void worker_reportProgress(worker_t *worker, int value);
 int  worker_cancellationPending(worker_t *worker);
-
 int  worker_isBusy(worker_t *worker);
-
-void worker_reportsProgress(worker_t *worker, int b);
-
-int  worker_kill(worker_t *worker, int signo);
 
 int  worker_run(worker_t *worker, void *arg, size_t len, int detachstate);
 void worker_exit(worker_t *worker, void *res, size_t len) __attribute__((__noreturn__));
 int  worker_join(worker_t *worker, void **retval);
-void worker_reportProgress(worker_t *worker, int value);
+int  worker_kill(worker_t *worker, int signo);
 
 #endif /* __WORKER_H */
